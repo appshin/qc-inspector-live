@@ -1,0 +1,703 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>QC.AI 실시간 검사</title>
+
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@latest/dist/teachablemachine-image.min.js"></script>
+
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Noto+Sans+KR:wght@400;700;900&family=JetBrains+Mono:wght@400;600&display=swap');
+
+:root {
+  --bg:      #0a0c0f;
+  --surface: #111418;
+  --border:  #1e2530;
+  --good:    #00ff88;
+  --bad:     #ff3355;
+  --accent:  #00aaff;
+  --text:    #e0e8f0;
+  --muted:   #4a5568;
+  --mono:    'JetBrains Mono', monospace;
+  --sans:    'Noto Sans KR', sans-serif;
+  --display: 'Bebas Neue', cursive;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ── 헤더 ── */
+header {
+  background: rgba(10,12,15,.95);
+  border-bottom: 1px solid var(--border);
+  padding: 0 16px;
+  height: 50px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+  z-index: 100;
+  backdrop-filter: blur(10px);
+}
+
+.logo {
+  font-family: var(--display);
+  font-size: 20px;
+  letter-spacing: 3px;
+  color: var(--accent);
+}
+.logo em { color: var(--text); font-style: normal; }
+
+.hd-sub {
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--muted);
+  letter-spacing: 1.5px;
+}
+
+.hd-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.led {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+  transition: all .3s;
+}
+.led.on  { background: var(--good); box-shadow: 0 0 8px var(--good); animation: blink 2s infinite; }
+.led.loading { background: #f0c040; box-shadow: 0 0 8px #f0c040; animation: blink .6s infinite; }
+.led.err { background: var(--bad); box-shadow: 0 0 8px var(--bad); }
+
+@keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
+
+.hd-status {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--muted);
+  letter-spacing: .5px;
+}
+
+/* ── 카메라 뷰 (메인 영역) ── */
+.cam-wrap {
+  flex: 1;
+  position: relative;
+  background: #000;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+/* 오버레이 캔버스 — 박스 그리기 */
+#overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+/* 플레이스홀더 */
+.cam-ph {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  color: #333;
+}
+.cam-ph .big { font-size: 52px; opacity: .4; }
+.cam-ph p { font-size: 13px; color: #3a4050; text-align: center; line-height: 1.7; font-family: var(--mono); }
+
+/* 로딩 오버레이 */
+.init-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(10,12,15,.92);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  z-index: 50;
+}
+.init-overlay.hide { display: none; }
+
+.spinner {
+  width: 40px; height: 40px;
+  border: 3px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin .7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.init-msg {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--accent);
+  letter-spacing: 2px;
+  animation: blink 1s infinite;
+}
+
+/* ── 하단 HUD ── */
+.hud {
+  background: rgba(10,12,15,.95);
+  border-top: 1px solid var(--border);
+  padding: 10px 14px;
+  flex-shrink: 0;
+  backdrop-filter: blur(10px);
+}
+
+/* 현재 판정 결과 크게 */
+.live-result {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.result-badge {
+  padding: 4px 14px;
+  border-radius: 6px;
+  font-family: var(--display);
+  font-size: 28px;
+  letter-spacing: 3px;
+  line-height: 1.1;
+  transition: all .2s;
+  min-width: 100px;
+  text-align: center;
+}
+.result-badge.good { background: rgba(0,255,136,.12); color: var(--good); border: 1px solid rgba(0,255,136,.3); }
+.result-badge.bad  { background: rgba(255,51,85,.12);  color: var(--bad);  border: 1px solid rgba(255,51,85,.3); }
+.result-badge.idle { background: rgba(255,255,255,.04); color: var(--muted); border: 1px solid var(--border); }
+
+.conf-block { flex: 1; }
+.conf-label {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--muted);
+  margin-bottom: 4px;
+  letter-spacing: .5px;
+}
+.conf-track { height: 5px; background: var(--border); border-radius: 3px; overflow: hidden; }
+.conf-fill  { height: 100%; border-radius: 3px; transition: width .15s, background .2s; }
+.conf-fill.good { background: var(--good); }
+.conf-fill.bad  { background: var(--bad); }
+
+/* 클래스 스코어 행 */
+.scores-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.score-chip {
+  flex: 1;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  transition: border-color .2s;
+}
+.score-chip.active-good { border-color: rgba(0,255,136,.4); background: rgba(0,255,136,.05); }
+.score-chip.active-bad  { border-color: rgba(255,51,85,.4);  background: rgba(255,51,85,.05); }
+
+.sc-name { font-size: 11px; color: var(--muted); }
+.sc-pct  { font-family: var(--mono); font-size: 15px; font-weight: 600; transition: color .2s; }
+.sc-pct.good { color: var(--good); }
+.sc-pct.bad  { color: var(--bad); }
+
+/* 버튼 행 */
+.btn-row {
+  display: flex;
+  gap: 8px;
+}
+
+.btn {
+  flex: 1;
+  padding: 10px 8px;
+  border: none;
+  border-radius: 8px;
+  font-family: var(--sans);
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all .15s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+}
+.btn:active { transform: scale(.97); }
+.btn:disabled { opacity: .35; cursor: not-allowed; }
+
+.btn-start { background: var(--accent); color: #000; }
+.btn-start:hover:not(:disabled) { background: #33bbff; }
+.btn-stop  { background: var(--bad); color: #fff; }
+.btn-stop:hover:not(:disabled)  { background: #ff6677; }
+.btn-ghost { background: var(--surface); color: var(--text); border: 1px solid var(--border); }
+.btn-ghost:hover:not(:disabled) { background: var(--border); }
+
+/* 통계 미니 */
+.mini-stats {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.mini-stat {
+  flex: 1;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  text-align: center;
+}
+.ms-val { font-family: var(--mono); font-size: 18px; font-weight: 600; }
+.ms-val.blue  { color: var(--accent); }
+.ms-val.green { color: var(--good); }
+.ms-val.red   { color: var(--bad); }
+.ms-lbl { font-size: 9px; color: var(--muted); letter-spacing: .5px; margin-top: 1px; }
+
+/* FPS / 상태 표시 */
+.fps-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.fps-chip {
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--muted);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  padding: 2px 7px;
+  border-radius: 4px;
+  letter-spacing: .5px;
+}
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <div class="logo">QC<em>.</em>AI</div>
+    <div class="hd-sub">REALTIME DETECTION</div>
+  </div>
+  <div class="hd-right">
+    <div class="led loading" id="led"></div>
+    <div class="hd-status" id="hdStatus">모델 로딩</div>
+  </div>
+</header>
+
+<!-- 카메라 뷰 -->
+<div class="cam-wrap" id="camWrap">
+  <video id="video" autoplay playsinline muted></video>
+  <canvas id="overlay"></canvas>
+
+  <div class="cam-ph" id="camPh">
+    <div class="big">📷</div>
+    <p>START 버튼을 눌러<br>카메라를 시작하세요</p>
+  </div>
+
+  <div class="init-overlay" id="initOverlay">
+    <div class="spinner"></div>
+    <div class="init-msg" id="initMsg">MODEL LOADING...</div>
+  </div>
+</div>
+
+<!-- HUD -->
+<div class="hud">
+
+  <!-- 통계 -->
+  <div class="mini-stats">
+    <div class="mini-stat"><div class="ms-val blue"  id="sTotal">0</div><div class="ms-lbl">TOTAL</div></div>
+    <div class="mini-stat"><div class="ms-val green" id="sGood">0</div><div class="ms-lbl">GOOD</div></div>
+    <div class="mini-stat"><div class="ms-val red"   id="sBad">0</div><div class="ms-lbl">DEFECT</div></div>
+    <div class="mini-stat"><div class="ms-val" id="sRate" style="color:var(--accent)">-</div><div class="ms-lbl">양품율</div></div>
+  </div>
+
+  <!-- FPS/상태 -->
+  <div class="fps-bar">
+    <div class="fps-chip" id="fpsChip">FPS: --</div>
+    <div class="fps-chip" id="modeChip">STOPPED</div>
+  </div>
+
+  <!-- 현재 판정 -->
+  <div class="live-result">
+    <div class="result-badge idle" id="resultBadge">대기</div>
+    <div class="conf-block">
+      <div class="conf-label">
+        <span>CONFIDENCE</span>
+        <span id="confNum">--</span>
+      </div>
+      <div class="conf-track">
+        <div class="conf-fill" id="confFill" style="width:0%"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 클래스 스코어 -->
+  <div class="scores-row" id="scoresRow">
+    <div class="score-chip" id="chip0">
+      <span class="sc-name">홈가공 양품</span>
+      <span class="sc-pct good" id="pct0">--%</span>
+    </div>
+    <div class="score-chip" id="chip1">
+      <span class="sc-name">홈가공 누락</span>
+      <span class="sc-pct bad"  id="pct1">--%</span>
+    </div>
+  </div>
+
+  <!-- 버튼 -->
+  <div class="btn-row">
+    <button class="btn btn-start" id="btnStart" onclick="startCamera()" disabled>▶ START</button>
+    <button class="btn btn-stop"  id="btnStop"  onclick="stopCamera()"  disabled>■ STOP</button>
+    <button class="btn btn-ghost"               onclick="resetStats()">↺ 초기화</button>
+  </div>
+
+</div>
+
+<script>
+const MODEL_URL = 'https://teachablemachine.withgoogle.com/models/ZDlR2EgcM/';
+
+let model     = null;
+let stream    = null;
+let running   = false;
+let rafId     = null;
+
+// 통계
+let stats = { total: 0, good: 0, bad: 0 };
+
+// FPS 계산
+let lastTime  = 0;
+let frameCount = 0;
+let fps       = 0;
+
+// 결과 스무딩 (급격한 깜빡임 방지)
+let smoothGood = 0;
+let smoothBad  = 0;
+const ALPHA = 0.3; // 이동평균 계수 (0=느림, 1=즉각반응)
+
+// 판정 누적 (연속 N프레임 같은 결과면 카운트)
+let lastLabel     = null;
+let sameCount     = 0;
+const CONFIRM_FRAMES = 8; // 8프레임 연속 같은 결과 → 확정
+
+// ── 모델 로드 ──────────────────────────────────────────────────
+async function init() {
+  setMsg('MODEL LOADING...');
+  try {
+    model = await tmImage.load(MODEL_URL + 'model.json', MODEL_URL + 'metadata.json');
+    setMsg('');
+    document.getElementById('initOverlay').classList.add('hide');
+    setLed('on', '준비 완료');
+    document.getElementById('btnStart').disabled = false;
+  } catch(e) {
+    setMsg('모델 로드 실패');
+    setLed('err', '오류');
+    console.error(e);
+  }
+}
+
+// ── 카메라 시작 ────────────────────────────────────────────────
+async function startCamera() {
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        facingMode: 'environment',
+        width:  { ideal: 1280 },
+        height: { ideal: 720 }
+      }
+    });
+    const video = document.getElementById('video');
+    video.srcObject = stream;
+    await video.play();
+
+    document.getElementById('camPh').style.display = 'none';
+    document.getElementById('btnStart').disabled = true;
+    document.getElementById('btnStop').disabled  = false;
+    document.getElementById('modeChip').textContent = '● LIVE';
+    document.getElementById('modeChip').style.color = 'var(--good)';
+
+    running = true;
+    requestAnimationFrame(detectLoop);
+  } catch(e) {
+    alert('카메라 권한이 필요합니다: ' + e.message);
+  }
+}
+
+// ── 카메라 중지 ────────────────────────────────────────────────
+function stopCamera() {
+  running = false;
+  if (rafId) cancelAnimationFrame(rafId);
+  if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+
+  const video = document.getElementById('video');
+  video.srcObject = null;
+
+  // 캔버스 클리어
+  const canvas = document.getElementById('overlay');
+  canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
+
+  document.getElementById('camPh').style.display = 'flex';
+  document.getElementById('btnStart').disabled = false;
+  document.getElementById('btnStop').disabled  = true;
+  document.getElementById('modeChip').textContent = '■ STOPPED';
+  document.getElementById('modeChip').style.color = 'var(--muted)';
+
+  // 결과 초기화
+  resetResultUI();
+}
+
+// ── 실시간 감지 루프 ───────────────────────────────────────────
+async function detectLoop(timestamp) {
+  if (!running) return;
+
+  // FPS 계산
+  frameCount++;
+  if (timestamp - lastTime >= 1000) {
+    fps = frameCount;
+    frameCount = 0;
+    lastTime = timestamp;
+    document.getElementById('fpsChip').textContent = 'FPS: ' + fps;
+  }
+
+  const video  = document.getElementById('video');
+  const canvas = document.getElementById('overlay');
+
+  // 캔버스 크기를 video 실제 표시 크기에 맞춤
+  const rect = video.getBoundingClientRect();
+  canvas.width  = rect.width;
+  canvas.height = rect.height;
+  canvas.style.width  = rect.width  + 'px';
+  canvas.style.height = rect.height + 'px';
+
+  if (video.readyState >= 2 && model) {
+    // Teachable Machine 예측
+    const predictions = await model.predict(video);
+
+    // Class 1 = 양품, Class 2 = 불량
+    let goodProb = 0, badProb = 0;
+    let goodLabel = '', badLabel = '';
+
+    predictions.forEach(p => {
+      const lo = p.className.toLowerCase();
+      if (lo.includes('class 1') || lo.includes('양품')) {
+        goodProb  = p.probability;
+        goodLabel = p.className;
+      } else {
+        badProb  = p.probability;
+        badLabel = p.className;
+      }
+    });
+
+    // 이동평균 스무딩
+    smoothGood = ALPHA * goodProb + (1 - ALPHA) * smoothGood;
+    smoothBad  = ALPHA * badProb  + (1 - ALPHA) * smoothBad;
+
+    const isGood  = smoothGood >= smoothBad;
+    const topConf = isGood ? smoothGood : smoothBad;
+    const label   = isGood ? 'good' : 'bad';
+
+    // 연속 프레임 누적 판정
+    if (label === lastLabel) {
+      sameCount++;
+    } else {
+      lastLabel = label;
+      sameCount = 1;
+    }
+
+    // UI 업데이트
+    updateResultUI(isGood, topConf, goodProb, badProb);
+
+    // 박스 그리기
+    drawBox(canvas, video, isGood, topConf, smoothGood, smoothBad);
+
+    // CONFIRM_FRAMES 연속이면 통계 카운트 (너무 많이 세지 않도록 CONFIRM_FRAMES마다 1번)
+    if (sameCount === CONFIRM_FRAMES) {
+      stats[isGood ? 'good' : 'bad']++;
+      stats.total++;
+      updateStats();
+    }
+  }
+
+  rafId = requestAnimationFrame(detectLoop);
+}
+
+// ── 박스 그리기 ────────────────────────────────────────────────
+function drawBox(canvas, video, isGood, conf, goodProb, badProb) {
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  const W = canvas.width;
+  const H = canvas.height;
+
+  // 신뢰도가 낮으면 박스 흐리게
+  const alpha = 0.4 + conf * 0.6;
+
+  const color  = isGood ? `rgba(0,255,136,${alpha})` : `rgba(255,51,85,${alpha})`;
+  const fill   = isGood ? `rgba(0,255,136,${alpha * 0.07})` : `rgba(255,51,85,${alpha * 0.07})`;
+  const label  = isGood ? '양  품' : '불  량';
+  const subLbl = isGood ? 'GOOD' : 'DEFECT';
+
+  // 박스 마진 (화면의 10% 여백)
+  const margin = Math.min(W, H) * 0.08;
+  const bx = margin;
+  const by = margin;
+  const bw = W - margin * 2;
+  const bh = H - margin * 2;
+
+  // 배경 채우기
+  ctx.fillStyle = fill;
+  ctx.fillRect(bx, by, bw, bh);
+
+  // 외곽선
+  ctx.strokeStyle = color;
+  ctx.lineWidth   = 2.5;
+  ctx.strokeRect(bx, by, bw, bh);
+
+  // 코너 강조 (두꺼운 L자)
+  const cLen = Math.min(bw, bh) * 0.08;
+  const cW   = 4;
+  ctx.strokeStyle = color;
+  ctx.lineWidth   = cW;
+
+  // TL
+  ctx.beginPath(); ctx.moveTo(bx, by + cLen); ctx.lineTo(bx, by); ctx.lineTo(bx + cLen, by); ctx.stroke();
+  // TR
+  ctx.beginPath(); ctx.moveTo(bx + bw - cLen, by); ctx.lineTo(bx + bw, by); ctx.lineTo(bx + bw, by + cLen); ctx.stroke();
+  // BL
+  ctx.beginPath(); ctx.moveTo(bx, by + bh - cLen); ctx.lineTo(bx, by + bh); ctx.lineTo(bx + cLen, by + bh); ctx.stroke();
+  // BR
+  ctx.beginPath(); ctx.moveTo(bx + bw - cLen, by + bh); ctx.lineTo(bx + bw, by + bh); ctx.lineTo(bx + bw, by + bh - cLen); ctx.stroke();
+
+  // 라벨 박스 (상단)
+  const labelH = 36;
+  const labelW = 180;
+  ctx.fillStyle = isGood ? `rgba(0,255,136,${alpha * 0.9})` : `rgba(255,51,85,${alpha * 0.9})`;
+  ctx.fillRect(bx, by - labelH, labelW, labelH);
+
+  // 라벨 텍스트
+  ctx.fillStyle = '#000';
+  ctx.font      = `bold 18px 'Bebas Neue', cursive`;
+  ctx.letterSpacing = '2px';
+  ctx.fillText(label, bx + 10, by - 10);
+
+  // 신뢰도 텍스트
+  ctx.font      = `600 12px 'JetBrains Mono', monospace`;
+  ctx.fillStyle = isGood ? 'rgba(0,0,0,0.7)' : 'rgba(0,0,0,0.7)';
+  ctx.fillText(Math.round(conf * 100) + '%', bx + 120, by - 12);
+
+  // 중앙 아이콘 (신뢰도 높을 때만)
+  if (conf > 0.7) {
+    ctx.font      = `${Math.min(W, H) * 0.12}px Arial`;
+    ctx.textAlign = 'center';
+    ctx.fillStyle = isGood ? `rgba(0,255,136,${(conf-0.7)*2})` : `rgba(255,51,85,${(conf-0.7)*2})`;
+    ctx.fillText(isGood ? '✓' : '✕', W/2, H/2 + Math.min(W,H)*0.06);
+    ctx.textAlign = 'left';
+  }
+
+  // 스캔라인 (연속 감지 중 애니메이션)
+  const scanY = by + ((Date.now() % 1500) / 1500) * bh;
+  const grad  = ctx.createLinearGradient(bx, scanY - 20, bx, scanY + 20);
+  grad.addColorStop(0,   'transparent');
+  grad.addColorStop(0.5, isGood ? `rgba(0,255,136,${alpha * 0.5})` : `rgba(255,51,85,${alpha * 0.5})`);
+  grad.addColorStop(1,   'transparent');
+  ctx.fillStyle = grad;
+  ctx.fillRect(bx, scanY - 20, bw, 40);
+}
+
+// ── UI 업데이트 ────────────────────────────────────────────────
+function updateResultUI(isGood, conf, goodProb, badProb) {
+  const badge   = document.getElementById('resultBadge');
+  const confFill = document.getElementById('confFill');
+  const confNum  = document.getElementById('confNum');
+  const chip0    = document.getElementById('chip0');
+  const chip1    = document.getElementById('chip1');
+  const pct0     = document.getElementById('pct0');
+  const pct1     = document.getElementById('pct1');
+
+  const pctConf = Math.round(conf * 100);
+
+  badge.className = 'result-badge ' + (isGood ? 'good' : 'bad');
+  badge.textContent = isGood ? '양  품' : '불  량';
+
+  confFill.className = 'conf-fill ' + (isGood ? 'good' : 'bad');
+  confFill.style.width = pctConf + '%';
+  confNum.textContent  = pctConf + '%';
+
+  pct0.textContent = Math.round(goodProb * 100) + '%';
+  pct1.textContent = Math.round(badProb  * 100) + '%';
+
+  chip0.className = 'score-chip ' + (isGood ? 'active-good' : '');
+  chip1.className = 'score-chip ' + (!isGood ? 'active-bad'  : '');
+}
+
+function resetResultUI() {
+  document.getElementById('resultBadge').className  = 'result-badge idle';
+  document.getElementById('resultBadge').textContent = '대기';
+  document.getElementById('confFill').style.width   = '0%';
+  document.getElementById('confNum').textContent     = '--';
+  document.getElementById('pct0').textContent = '--%';
+  document.getElementById('pct1').textContent = '--%';
+  document.getElementById('chip0').className  = 'score-chip';
+  document.getElementById('chip1').className  = 'score-chip';
+  smoothGood = 0; smoothBad = 0;
+  lastLabel = null; sameCount = 0;
+}
+
+function updateStats() {
+  document.getElementById('sTotal').textContent = stats.total;
+  document.getElementById('sGood').textContent  = stats.good;
+  document.getElementById('sBad').textContent   = stats.bad;
+  const rate = stats.total > 0 ? Math.round(stats.good / stats.total * 100) : '-';
+  document.getElementById('sRate').textContent  = rate === '-' ? '-' : rate + '%';
+}
+
+function resetStats() {
+  stats = { total:0, good:0, bad:0 };
+  updateStats();
+}
+
+// ── 유틸 ───────────────────────────────────────────────────────
+function setLed(state, text) {
+  document.getElementById('led').className = 'led ' + state;
+  document.getElementById('hdStatus').textContent = text;
+}
+function setMsg(msg) {
+  document.getElementById('initMsg').textContent = msg;
+}
+
+// ── 시작 ───────────────────────────────────────────────────────
+init();
+</script>
+</body>
+</html>
