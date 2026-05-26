@@ -35,7 +35,7 @@ header{background:rgba(10,12,15,.96);border-bottom:1px solid var(--border);paddi
 /* 카메라 */
 .cam-wrap{flex:1;position:relative;background:#000;overflow:hidden;display:flex;align-items:center;justify-content:center;min-height:0}
 #video{width:100%;height:100%;object-fit:cover;display:block}
-#overlay{position:absolute;inset:0;pointer-events:none}
+#overlay{position:absolute;inset:0;pointer-events:none;width:100%;height:100%;z-index:4}
 .cam-ph{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;color:#333}
 .cam-ph .big{font-size:48px;opacity:.35}
 .cam-ph p{font-size:12px;color:#3a4050;text-align:center;line-height:1.7;font-family:var(--mono)}
@@ -78,6 +78,7 @@ header{background:rgba(10,12,15,.96);border-bottom:1px solid var(--border);paddi
 .result-badge.good{background:rgba(0,255,136,.12);color:var(--good);border:1px solid rgba(0,255,136,.3)}
 .result-badge.bad{background:rgba(255,51,85,.12);color:var(--bad);border:1px solid rgba(255,51,85,.3)}
 .result-badge.idle{background:rgba(255,255,255,.04);color:var(--muted);border:1px solid var(--border)}
+.result-badge.scanning{background:rgba(0,170,255,.08);color:var(--accent);border:1px solid rgba(0,170,255,.3);font-size:14px;letter-spacing:1px;animation:blink 1.2s infinite}
 .conf-block{flex:1}
 .conf-label{display:flex;justify-content:space-between;font-family:var(--mono);font-size:10px;color:var(--muted);margin-bottom:4px;letter-spacing:.5px}
 .conf-track{height:5px;background:var(--border);border-radius:3px;overflow:hidden}
@@ -282,6 +283,9 @@ const CONFIRM_FRAMES = 8;
 let lastAlertTime = 0;
 const ALERT_COOLDOWN = 3000;
 
+// 신뢰도 임계값 — 이 값 미만이면 "제품 인식중" 표시
+const CONFIDENCE_THRESHOLD = 0.70;
+
 // AudioContext
 let audioCtx = null;
 
@@ -396,6 +400,12 @@ async function startCamera() {
     document.getElementById('modeChip').textContent = '● LIVE';
     document.getElementById('modeChip').style.color = 'var(--good)';
 
+    // 캔버스 크기 초기화
+    const wrap   = document.getElementById('camWrap');
+    const canvas = document.getElementById('overlay');
+    canvas.width  = wrap.clientWidth;
+    canvas.height = wrap.clientHeight;
+
     // 시작 시간
     startTime = new Date();
     endTime   = null;
@@ -460,9 +470,13 @@ async function detectLoop(timestamp) {
 
   const video  = document.getElementById('video');
   const canvas = document.getElementById('overlay');
-  const rect   = video.getBoundingClientRect();
-  canvas.width  = rect.width;
-  canvas.height = rect.height;
+  const wrap   = document.getElementById('camWrap');
+
+  // 캔버스 크기를 camWrap에 맞춤 (매 프레임 재설정 시 깜빡임 방지)
+  if (canvas.width !== wrap.clientWidth || canvas.height !== wrap.clientHeight) {
+    canvas.width  = wrap.clientWidth;
+    canvas.height = wrap.clientHeight;
+  }
 
   if (video.readyState >= 2 && model) {
     const predictions = await model.predict(video);
@@ -481,20 +495,27 @@ async function detectLoop(timestamp) {
     const topConf = isGood ? smoothGood : smoothBad;
     const label   = isGood ? 'good' : 'bad';
 
-    if (label === lastLabel) { sameCount++; } else { lastLabel=label; sameCount=1; }
+    // 신뢰도 임계값 미만 → 제품 인식중 표시
+    if (topConf < CONFIDENCE_THRESHOLD) {
+      showScanning(smoothGood, smoothBad);
+      drawScanningBox(canvas);
+      lastLabel = null; sameCount = 0;
+    } else {
+      if (label === lastLabel) { sameCount++; } else { lastLabel=label; sameCount=1; }
 
-    updateResultUI(isGood, topConf, goodProb, badProb);
-    drawBox(canvas, video, isGood, topConf);
+      updateResultUI(isGood, topConf, goodProb, badProb);
+      drawBox(canvas, video, isGood, topConf);
 
-    // CONFIRM_FRAMES 연속 확정
-    if (sameCount === CONFIRM_FRAMES) {
-      if (isGood) {
-        stats.good++;
-        stats.total++;
-        updateStats();
-      } else {
-        // 불량 알림 (쿨다운 적용)
-        triggerDefectAlert(topConf);
+      // CONFIRM_FRAMES 연속 확정
+      if (sameCount === CONFIRM_FRAMES) {
+        if (isGood) {
+          stats.good++;
+          stats.total++;
+          updateStats();
+        } else {
+          // 불량 알림 (쿨다운 적용)
+          triggerDefectAlert(topConf);
+        }
       }
     }
   }
@@ -502,10 +523,68 @@ async function detectLoop(timestamp) {
   rafId = requestAnimationFrame(detectLoop);
 }
 
+// ── 인식중 상태 UI ──────────────────────────────────────────────
+function showScanning(gp, bp) {
+  const badge = document.getElementById('resultBadge');
+  badge.className   = 'result-badge scanning';
+  badge.textContent = '제품 인식중...';
+
+  const cf = document.getElementById('confFill');
+  cf.className   = 'conf-fill';
+  cf.style.width = '0%';
+  cf.style.background = 'var(--accent)';
+  document.getElementById('confNum').textContent = '--';
+  document.getElementById('pct0').textContent = Math.round(gp*100)+'%';
+  document.getElementById('pct1').textContent = Math.round(bp*100)+'%';
+  document.getElementById('chip0').className = 'score-chip';
+  document.getElementById('chip1').className = 'score-chip';
+}
+
+// 인식중일 때 회색 점선 박스
+function drawScanningBox(canvas) {
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width  || canvas.offsetWidth  || 300;
+  const H = canvas.height || canvas.offsetHeight || 400;
+  ctx.clearRect(0,0,W,H);
+
+  const mg = Math.min(W,H)*0.07;
+  const bx=mg, by=mg, bw=W-mg*2, bh=H-mg*2;
+
+  // 점선 외곽선
+  ctx.strokeStyle = 'rgba(0,170,255,0.4)';
+  ctx.lineWidth   = 2;
+  ctx.setLineDash([10, 8]);
+  ctx.strokeRect(bx, by, bw, bh);
+  ctx.setLineDash([]);
+
+  // 코너 L자 (흐린 파란색)
+  const cL=Math.min(bw,bh)*0.09, cW=3;
+  ctx.lineWidth=cW; ctx.strokeStyle='rgba(0,170,255,0.6)';
+  [[bx,by,1,1],[bx+bw,by,-1,1],[bx,by+bh,1,-1],[bx+bw,by+bh,-1,-1]].forEach(([cx,cy,dx,dy])=>{
+    ctx.beginPath(); ctx.moveTo(cx+dx*cL,cy); ctx.lineTo(cx,cy); ctx.lineTo(cx,cy+dy*cL); ctx.stroke();
+  });
+
+  // 중앙 "제품 인식중" 텍스트
+  ctx.textAlign  = 'center';
+  ctx.fillStyle  = `rgba(0,170,255,${0.4 + Math.sin(Date.now()/300)*0.2})`;
+  ctx.font       = `600 ${Math.min(W,H)*0.045}px 'Noto Sans KR',sans-serif`;
+  ctx.fillText('제품 인식중...', W/2, H/2);
+
+  // 스캔라인 (파란색)
+  const sy = by+((Date.now()%1800)/1800)*bh;
+  const gr = ctx.createLinearGradient(bx,sy-18,bx,sy+18);
+  gr.addColorStop(0,'transparent');
+  gr.addColorStop(0.5,'rgba(0,170,255,0.25)');
+  gr.addColorStop(1,'transparent');
+  ctx.fillStyle=gr; ctx.fillRect(bx,sy-18,bw,36);
+  ctx.textAlign = 'left';
+}
+
 // ── 박스 그리기 ────────────────────────────────────────────────
 function drawBox(canvas, video, isGood, conf) {
   const ctx  = canvas.getContext('2d');
-  const W    = canvas.width, H = canvas.height;
+  const W    = canvas.width  || canvas.offsetWidth  || 300;
+  const H    = canvas.height || canvas.offsetHeight || 400;
   ctx.clearRect(0,0,W,H);
 
   const alpha  = 0.35 + conf*0.65;
@@ -750,6 +829,17 @@ function downloadCSV() {
 function setLed(s,t){ document.getElementById('led').className='led '+s; document.getElementById('hdStatus').textContent=t; }
 
 init();
+
+// 화면 크기 변경 시 캔버스 자동 조정
+const resizeObserver = new ResizeObserver(() => {
+  const wrap   = document.getElementById('camWrap');
+  const canvas = document.getElementById('overlay');
+  if (wrap.clientWidth > 0 && wrap.clientHeight > 0) {
+    canvas.width  = wrap.clientWidth;
+    canvas.height = wrap.clientHeight;
+  }
+});
+resizeObserver.observe(document.getElementById('camWrap'));
 </script>
 </body>
 </html>
